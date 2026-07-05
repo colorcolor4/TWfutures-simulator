@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>期貨低接策略模擬器</title>
+<style>
+body{font:15px/1.6 -apple-system,'PingFang TC',sans-serif;max-width:760px;margin:1em auto;padding:0 12px}
+table{border-collapse:collapse;width:100%;margin:.6em 0}td,th{border:1px solid #ccc;padding:4px 10px;text-align:left}
+svg{width:100%;height:auto;border:1px solid #ddd;border-radius:6px}
+h1{font-size:1.3em}h2{font-size:1.1em}
+.kpi{display:flex;gap:1em;flex-wrap:wrap}.kpi div{background:#f5f5f7;border-radius:8px;padding:8px 14px}
+.twrap{overflow-x:auto}
+fieldset{margin:.4em 0;border:1px solid #ccc;border-radius:6px}
+fieldset label{margin-right:.8em}
+input[type=number]{width:5.5em}#capital{width:8em}
+.trow input,.crow input{width:4.2em}
+#cfg{background:#f5f5f7;border-radius:6px;padding:6px 10px;overflow-x:auto}
+#err{color:#c33;white-space:pre-wrap;overflow-x:auto}
+#out{overflow-x:auto}
+.pos{color:#2a7}.neg{color:#c33}
+.tabs{margin:.6em 0}
+.tabs button{padding:6px 14px;margin-right:4px;border:1px solid #ccc;border-radius:6px 6px 0 0;background:#f5f5f7;cursor:pointer;font:inherit}
+.tabs button.active{background:#2a6;color:#fff;border-color:#2a6}
+.crow{margin:.3em 0}
+details summary{cursor:pointer;font-weight:bold;margin:.4em 0}
+#cmpTable a{color:#06c;text-decoration:none}
+#cmpTable a:hover{text-decoration:underline}
+</style>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+</head>
+<body>
+<h1>期貨低接策略模擬器</h1>
+
+<div class="tabs">
+  <button type="button" id="tabBtnBt" class="active">回測</button>
+  <button type="button" id="tabBtnCmp">比較</button>
+</div>
+
+<section id="tab-bt">
+
+<form id="f" onsubmit="return false">
+  <fieldset>
+    <legend>① 策略名稱／本金／上限</legend>
+    <label>name <input id="name" type="text" size="8" value="自訂"></label>
+    <label>本金 <input id="capital" type="number" step="1" value="1000000"></label>
+    <label>cap（槓桿上限，空＝曲線最大值） <input id="cap" type="number" step="any"></label>
+  </fieldset>
+
+  <fieldset>
+    <legend>② 買進策略：目標曝險曲線（大盤自高點跌 X% → 目標槓桿 Y 倍）</legend>
+    <div id="curve"></div>
+    <button type="button" id="curveAdd">＋加一格</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>③ 賣出策略（勾選＝啟用）</legend>
+    <label><input id="eq_stop_on" type="checkbox"> 權益停損：回撤達 <input id="eq_stop" type="number" step="any">% 全平</label><br>
+    <label><input id="exit_ma_on" type="checkbox"> 創新高後跌破 <input id="exit_ma" type="number" step="1"> 日線出場</label><br>
+    <label><input id="exit_cross_on" type="checkbox"> 快慢線死叉出場：快 <input id="exit_cross_f" type="number" step="1"> 慢 <input id="exit_cross_s" type="number" step="1"></label><br>
+    <label><input id="exit_daydrop_on" type="checkbox"> 單日跌幅 ≥ <input id="exit_daydrop" type="number" step="any">% 出場</label><br>
+    <label><input id="exit_flat_on" type="checkbox"> 盤整 <input id="exit_flat" type="number" step="1"> 日出場</label>
+  </fieldset>
+
+  <details>
+    <summary>④ 進階（power user）</summary>
+    <fieldset>
+      <legend>探底</legend>
+      <label><input id="probe" type="checkbox"> probe</label>
+      <label><input id="hybrid" type="checkbox"> hybrid</label>
+      <label>probe_start% <input id="probe_start" type="number" step="any"></label>
+      <label>probe_reclaim <input id="probe_reclaim" type="number" step="1"></label>
+    </fieldset>
+    <fieldset>
+      <legend>濾網</legend>
+      <label><input id="bear_filter" type="checkbox"> bear_filter</label>
+      <label><input id="requick" type="checkbox"> requick</label>
+      <label>confirm_ma <input id="confirm_ma" type="number" step="1"></label>
+      <label>vol_gate% <input id="vol_gate" type="number" step="any"></label>
+    </fieldset>
+    <fieldset>
+      <legend>馬丁格爾模式（與曲線二選一；勾了就用點數批次表，忽略曲線的加碼格）</legend>
+      <label><input id="tranches_pts_on" type="checkbox"> 輸出 tranches_pts 鍵（每跌 N 點加碼 Y 倍）</label>
+      <div id="tranches_pts"></div>
+      <button type="button" onclick="addRow('tranches_pts')">＋加一批（點）</button>
+    </fieldset>
+  </details>
+
+  <p><button type="button" id="run">回測</button> <button type="button" id="save" disabled>存進比較</button> <span id="status"></span></p>
+</form>
+
+<h2>cfg JSON</h2>
+<pre id="cfg"></pre>
+
+<pre id="err" hidden></pre>
+
+<div id="results" hidden>
+  <h2>口數級真實績效</h2>
+  <div class="kpi" id="kpi"></div>
+  <div class="twrap"><table id="cmp">
+    <tr><th>模型</th><th>總報酬</th><th>最大回撤</th></tr>
+  </table></div>
+  <h2>權益曲線</h2>
+  <div id="chart"></div>
+  <h2>年度報酬（口數）</h2>
+  <div class="twrap"><table id="yearly"><tr><th>年</th><th>報酬</th></tr></table></div>
+  <h2>追繳／強平事件</h2>
+  <div class="twrap"><table id="events"><tr><th>日期</th><th>事件</th><th>權益</th></tr></table></div>
+</div>
+
+<details>
+  <summary>原始輸出（除錯用）</summary>
+  <pre id="out"></pre>
+</details>
+
+</section>
+
+<section id="tab-cmp" hidden>
+  <h2>策略比較</h2>
+  <div class="twrap">
+  <table id="cmpWrap">
+    <thead><tr><th></th><th>策略名</th><th>本金</th><th>總報酬</th><th>最大回撤</th><th>強平次數</th><th>最佳年</th><th>最差年</th><th>爆倉</th></tr></thead>
+    <tbody id="cmpTable"></tbody>
+  </table>
+  </div>
+  <p>
+    <button type="button" id="cmpDelete">刪除勾選</button>
+    <button type="button" id="cmpExport">匯出備份</button>
+    <button type="button" id="cmpImport">匯入還原</button>
+    <input type="file" id="cmpFile" accept="application/json,.json" hidden>
+    <span id="cmpStatus"></span>
+  </p>
+  <p style="color:#888;font-size:.85em">策略只存在這支手機的瀏覽器；換手機／清除瀏覽資料／iPhone 放 7 天沒開都可能消失。重要策略請按「匯出備份」存成檔案，換裝置用「匯入還原」帶回。</p>
+</section>
+
+<script>
+// ---------- Tab 切換 ----------
+function switchTab(name) {
+  document.getElementById("tab-bt").hidden = name !== "bt";
+  document.getElementById("tab-cmp").hidden = name !== "cmp";
+  document.getElementById("tabBtnBt").classList.toggle("active", name === "bt");
+  document.getElementById("tabBtnCmp").classList.toggle("active", name === "cmp");
+  if (name === "cmp") renderCompare();
+}
+document.getElementById("tabBtnBt").onclick = () => switchTab("bt");
+document.getElementById("tabBtnCmp").onclick = () => switchTab("cmp");
+
+// ---------- 動態批次列（tranches_pts，沿用舊版邏輯） ----------
+function addRow(containerId, a, b) {
+  const div = document.createElement("div");
+  div.className = "trow";
+  div.innerHTML = '觸發 <input type="number" step="any" class="trig"> ' +
+                  '加碼 <input type="number" step="any" class="add"> ' +
+                  '<button type="button">－移除</button>';
+  if (a !== undefined) div.querySelector(".trig").value = a;
+  if (b !== undefined) div.querySelector(".add").value = b;
+  div.querySelector("button").onclick = () => { div.remove(); refreshCfg(); };
+  document.getElementById(containerId).appendChild(div);
+}
+function readRows(containerId) {
+  const rows = [];
+  for (const div of document.getElementById(containerId).querySelectorAll(".trow")) {
+    const t = div.querySelector(".trig").value.trim();
+    const a = div.querySelector(".add").value.trim();
+    if (t !== "" && a !== "") rows.push([Number(t), Number(a)]);
+  }
+  return rows;
+}
+function clearRows(containerId) {
+  document.getElementById(containerId).replaceChildren();
+}
+
+// ---------- 槓桿曲線表（買進策略主角） ----------
+function round4(n) { return Math.round(n * 10000) / 10000; }
+
+function addCurveRow(x, y) {
+  const div = document.createElement("div");
+  div.className = "crow";
+  div.innerHTML = '大盤自高點跌 <input type="number" step="any" class="cx"> % → 目標槓桿 <input type="number" step="any" class="cy"> 倍 ' +
+                  '<button type="button">－移除</button>';
+  if (x !== undefined) div.querySelector(".cx").value = x;
+  if (y !== undefined) div.querySelector(".cy").value = y;
+  div.querySelector("button").onclick = () => { div.remove(); refreshCfg(); };
+  document.getElementById("curve").appendChild(div);
+}
+function readCurveRows() {
+  const rows = [];
+  for (const div of document.getElementById("curve").querySelectorAll(".crow")) {
+    const x = div.querySelector(".cx").value.trim();
+    const y = div.querySelector(".cy").value.trim();
+    if (x !== "" && y !== "") rows.push({ x: Number(x), y: Number(y) });
+  }
+  return rows;
+}
+function clearCurveRows() {
+  document.getElementById("curve").replaceChildren();
+}
+document.getElementById("curveAdd").onclick = () => addCurveRow();
+
+// 正向：曲線表 → cfg 的 base/tranches/cap（見規格卡「關鍵契約」）
+function applyCurveToCfg(cfg) {
+  const rows = readCurveRows().sort((a, b) => a.x - b.x);
+  const zeroRow = rows.find(r => r.x === 0);
+  const base = zeroRow ? zeroRow.y : 0.5;
+  let prevY = base;
+  const tranches = [];
+  for (const r of rows) {
+    if (r.x <= 0) continue;
+    tranches.push([r.x, round4(r.y - prevY)]);
+    prevY = r.y;
+  }
+  cfg.base = base;
+  if (chk("tranches_pts_on")) {
+    cfg.tranches_pts = readRows("tranches_pts");
+  } else {
+    cfg.tranches = tranches;
+  }
+  const capVal = numOf("cap");
+  const maxY = rows.length ? Math.max(base, ...rows.map(r => r.y)) : base;
+  cfg.cap = capVal !== null ? capVal : maxY;
+}
+
+// ---------- 表單 → cfg（空值/未勾＝鍵不出現） ----------
+function numOf(id) {
+  const v = document.getElementById(id).value.trim();
+  return v === "" ? null : Number(v);
+}
+function chk(id) { return document.getElementById(id).checked; }
+
+function buildCfg() {
+  const cfg = { name: document.getElementById("name").value.trim() || "自訂" };
+  applyCurveToCfg(cfg);
+  // 賣出策略
+  if (chk("eq_stop_on")) { const v = numOf("eq_stop"); if (v !== null) cfg.eq_stop = v; }
+  if (chk("exit_ma_on")) { const v = numOf("exit_ma"); if (v !== null) cfg.exit_ma = v; }
+  if (chk("exit_cross_on")) {
+    const f = numOf("exit_cross_f"), s = numOf("exit_cross_s");
+    if (f !== null && s !== null) cfg.exit_cross = [f, s];
+  }
+  if (chk("exit_daydrop_on")) { const v = numOf("exit_daydrop"); if (v !== null) cfg.exit_daydrop = v; }
+  if (chk("exit_flat_on")) { const v = numOf("exit_flat"); if (v !== null) cfg.exit_flat = v; }
+  // 進階：濾網
+  for (const k of ["vol_gate", "confirm_ma"]) {
+    const v = numOf(k);
+    if (v !== null) cfg[k] = v;
+  }
+  if (chk("bear_filter")) cfg.bear_filter = true;
+  if (chk("requick")) cfg.requick = true;
+  // 進階：探底
+  if (chk("probe")) {
+    cfg.probe = true;
+    if (chk("hybrid")) cfg.hybrid = true;
+    const ps = numOf("probe_start"); if (ps !== null) cfg.probe_start = ps;
+    const pr = numOf("probe_reclaim"); if (pr !== null) cfg.probe_reclaim = pr;
+  }
+  return cfg;
+}
+function refreshCfg() {
+  document.getElementById("cfg").textContent = JSON.stringify(buildCfg());
+}
+document.getElementById("f").addEventListener("input", refreshCfg);
+
+// ---------- cfg → 填表（反向換算，見規格卡「關鍵契約」；供比較頁「點名載回」與初始示範用） ----------
+function setForm(cfg) {
+  document.getElementById("name").value = cfg.name || "自訂";
+  document.getElementById("cap").value = "";
+
+  // 重置賣出
+  for (const k of ["eq_stop", "exit_ma", "exit_daydrop", "exit_flat", "exit_cross_f", "exit_cross_s"])
+    document.getElementById(k).value = "";
+  for (const k of ["eq_stop_on", "exit_ma_on", "exit_cross_on", "exit_daydrop_on", "exit_flat_on"])
+    document.getElementById(k).checked = false;
+
+  // 重置進階
+  for (const k of ["vol_gate", "confirm_ma", "probe_start", "probe_reclaim"])
+    document.getElementById(k).value = "";
+  for (const k of ["probe", "hybrid", "bear_filter", "requick", "tranches_pts_on"])
+    document.getElementById(k).checked = false;
+  clearRows("tranches_pts");
+
+  // 重置＋反向填曲線
+  clearCurveRows();
+  const base = cfg.base ?? 0.5;
+  if (cfg.tranches_pts !== undefined) {
+    addCurveRow(0, base);
+    document.getElementById("tranches_pts_on").checked = true;
+    for (const [t, a] of cfg.tranches_pts) addRow("tranches_pts", t, a);
+  } else {
+    addCurveRow(0, base);
+    let y = base;
+    for (const [trig, add] of (cfg.tranches ?? [])) {
+      y = round4(y + add);
+      addCurveRow(trig, y);
+    }
+  }
+  if (cfg.cap !== undefined) document.getElementById("cap").value = cfg.cap;
+
+  // 反向填賣出
+  if (cfg.eq_stop !== undefined) { document.getElementById("eq_stop_on").checked = true; document.getElementById("eq_stop").value = cfg.eq_stop; }
+  if (cfg.exit_ma !== undefined) { document.getElementById("exit_ma_on").checked = true; document.getElementById("exit_ma").value = cfg.exit_ma; }
+  if (cfg.exit_cross) {
+    document.getElementById("exit_cross_on").checked = true;
+    document.getElementById("exit_cross_f").value = cfg.exit_cross[0];
+    document.getElementById("exit_cross_s").value = cfg.exit_cross[1];
+  }
+  if (cfg.exit_daydrop !== undefined) { document.getElementById("exit_daydrop_on").checked = true; document.getElementById("exit_daydrop").value = cfg.exit_daydrop; }
+  if (cfg.exit_flat !== undefined) { document.getElementById("exit_flat_on").checked = true; document.getElementById("exit_flat").value = cfg.exit_flat; }
+
+  // 反向填進階
+  if (cfg.vol_gate !== undefined) document.getElementById("vol_gate").value = cfg.vol_gate;
+  if (cfg.confirm_ma !== undefined) document.getElementById("confirm_ma").value = cfg.confirm_ma;
+  if (cfg.probe) document.getElementById("probe").checked = true;
+  if (cfg.hybrid) document.getElementById("hybrid").checked = true;
+  if (cfg.probe_start !== undefined) document.getElementById("probe_start").value = cfg.probe_start;
+  if (cfg.probe_reclaim !== undefined) document.getElementById("probe_reclaim").value = cfg.probe_reclaim;
+  if (cfg.bear_filter) document.getElementById("bear_filter").checked = true;
+  if (cfg.requick) document.getElementById("requick").checked = true;
+
+  refreshCfg();
+}
+
+// ---------- Pyodide 膠水（載一次重複用；引擎零修改） ----------
+const PY_GLUE = `
+import os, sys, io, csv, json, contextlib, traceback
+
+os.chdir("/")
+
+if not os.path.exists("/全職交易/TWII_日線.csv"):
+    rows = list(csv.DictReader(open("/全職交易/TWII_日線OHLC.csv", encoding="utf-8-sig")))
+    with open("/全職交易/TWII_日線.csv", "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["date", "close"])
+        for r in rows:
+            w.writerow([r["date"], r["close"]])
+
+for _p in ("/全職交易/序列.csv", "/全職交易/口數回測結果.csv"):
+    if os.path.exists(_p):
+        os.remove(_p)
+
+sys.argv = ["期貨低接回測.py", "--json", CFG_JSON, "--emit", "全職交易/序列.csv"]
+buf1 = io.StringIO()
+g1 = {"__name__": "__main__", "__file__": "/工具/期貨低接回測.py"}
+try:
+    with contextlib.redirect_stdout(buf1):
+        exec(open("/工具/期貨低接回測.py", encoding="utf-8").read(), g1)
+except Exception:
+    buf1.write("\\n" + traceback.format_exc())
+out1 = buf1.getvalue()
+
+out2 = ""
+result_csv = ""
+if os.path.exists("/全職交易/序列.csv"):
+    sys.argv = ["口數回測.py", "全職交易/序列.csv", "--capital", str(CAPITAL)]
+    buf2 = io.StringIO()
+    g2 = {"__name__": "__main__", "__file__": "/工具/口數回測.py"}
+    try:
+        with contextlib.redirect_stdout(buf2):
+            exec(open("/工具/口數回測.py", encoding="utf-8").read(), g2)
+    except Exception:
+        buf2.write("\\n" + traceback.format_exc())
+    out2 = buf2.getvalue()
+    try:
+        result_csv = open("/全職交易/口數回測結果.csv", encoding="utf-8-sig").read()
+    except Exception:
+        out2 += "\\n" + traceback.format_exc()
+else:
+    out2 = "（倍數模型未輸出曝險序列——可能權益歸零(畢業)，口數回測未執行）"
+
+json.dumps({"out1": out1, "out2": out2, "csv": result_csv})
+`;
+
+const errEl = document.getElementById("err");
+const outEl = document.getElementById("out");
+const statusEl = document.getElementById("status");
+
+const pyodideReady = (async () => {
+  statusEl.textContent = "Pyodide 載入中…";
+  const pyodide = await loadPyodide();
+  const files = [
+    ["engine/期貨低接回測.py", "/工具/期貨低接回測.py"],
+    ["engine/保證金引擎.py", "/工具/保證金引擎.py"],
+    ["engine/口數回測.py", "/工具/口數回測.py"],
+    ["data/TWII_日線OHLC.csv", "/全職交易/TWII_日線OHLC.csv"],
+  ];
+  pyodide.FS.mkdirTree("/工具");
+  pyodide.FS.mkdirTree("/全職交易");
+  for (const [url, dest] of files) {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`fetch 失敗 ${url}: ${resp.status}`);
+    pyodide.FS.writeFile(dest, new Uint8Array(await resp.arrayBuffer()));
+  }
+  statusEl.textContent = "";
+  return pyodide;
+})();
+pyodideReady.catch(err => {
+  errEl.hidden = false;
+  errEl.textContent = "Pyodide 載入失敗：\n" + (err && err.stack ? err.stack : String(err));
+  statusEl.textContent = "";
+});
+
+// ---------- 結果渲染 ----------
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function pctCell(v) {
+  const neg = v.trim().startsWith("-");
+  return `<td class="${neg ? "neg" : "pos"}">${esc(v)}</td>`;
+}
+
+// 年度報酬解析（口數段「年度:」那行）
+function parseYearly(out2) {
+  const yl = out2.split("\n").find(l => l.includes("年度:")) || "";
+  const arr = [];
+  for (const m of yl.matchAll(/(\d{4}):([+\-]\d+)%/g))
+    arr.push({ year: m[1], val: Number(m[2]), str: m[2] + "%" });
+  return arr;
+}
+function bestWorst(arr) {
+  if (!arr.length) return { best: null, worst: null };
+  let best = arr[0], worst = arr[0];
+  for (const a of arr) {
+    if (a.val > best.val) best = a;
+    if (a.val < worst.val) worst = a;
+  }
+  return {
+    best: { year: best.year, ret: best.str },
+    worst: { year: worst.year, ret: worst.str },
+  };
+}
+// 爆倉年：結果 csv 事件欄找「畢業」，取該列日期前4碼
+function findRuinYear(csvText) {
+  if (!csvText) return null;
+  const lines = csvText.replace(/^﻿/, "").trim().split("\n");
+  for (const line of lines.slice(1)) {
+    const c = line.split(",");
+    if (c.length < 7) continue;
+    const ev = (c[6] || "").trim();
+    if (ev.includes("畢業")) return c[0].slice(0, 4);
+  }
+  return null;
+}
+
+// 解析 out1/out2/csv → 摘要物件（KPI/比較頁共用；解析 regex 複用舊版 render() 邏輯）
+function computeSummary(out1, out2, csvText) {
+  const real = out2.match(/總報酬 ([+\-]\d+%)（終值 ([\d,]+)）｜最大回撤 (-?\d+%)/);
+  const cnt = out2.match(/強平 (\d+) 次｜追繳警告 (\d+) 次/);
+  const mult = out1.match(/總報酬 ([+\-]\d+%)｜最大回撤 (-?\d+%)/);
+  if (!real || !cnt) return null;
+  const yearArr = parseYearly(out2);
+  const { best, worst } = bestWorst(yearArr);
+  const ruinYear = findRuinYear(csvText);
+  return {
+    total: real[1], finalEquity: real[2], maxdd: real[3],
+    forced: Number(cnt[1]), marginCalls: Number(cnt[2]),
+    mult, yearArr, best, worst, ruinYear,
+  };
+}
+
+function renderResults(summary) {
+  const results = document.getElementById("results");
+  document.getElementById("kpi").innerHTML =
+    `<div>終值<br><b>${esc(summary.finalEquity)}</b></div>` +
+    `<div>總報酬<br><b>${esc(summary.total)}</b></div>` +
+    `<div>最大回撤<br><b>${esc(summary.maxdd)}</b></div>` +
+    `<div>強平<br><b>${summary.forced} 次</b></div>` +
+    `<div>追繳警告<br><b>${summary.marginCalls} 次</b></div>` +
+    `<div>爆倉<br><b>${summary.ruinYear ? "💀 帳戶歸零 " + esc(summary.ruinYear) + " 年" : (summary.forced > 0 ? "💀 曾強平 " + summary.forced + " 次" : "✅ 未爆倉")}</b></div>` +
+    `<div>最佳年<br><b>${summary.best ? esc(summary.best.year + ":" + summary.best.ret) : "—"}</b></div>` +
+    `<div>最差年<br><b>${summary.worst ? esc(summary.worst.year + ":" + summary.worst.ret) : "—"}</b></div>`;
+  document.getElementById("cmp").innerHTML =
+    "<tr><th>模型</th><th>總報酬</th><th>最大回撤</th></tr>" +
+    (summary.mult ? `<tr><td>倍數模型（無保證金/成本）</td>${pctCell(summary.mult[1])}${pctCell(summary.mult[2])}</tr>` : "") +
+    `<tr><td>口數真實（保證金＋成本）</td>${pctCell(summary.total)}${pctCell(summary.maxdd)}</tr>`;
+  let yrows = "";
+  for (const y of summary.yearArr) yrows += `<tr><td>${y.year}</td>${pctCell(y.str)}</tr>`;
+  document.getElementById("yearly").innerHTML =
+    "<tr><th>年</th><th>報酬</th></tr>" + (yrows || "<tr><td colspan=2>無資料</td></tr>");
+  results.hidden = false;
+}
+
+function renderChartAndEvents(csvText) {
+  const chart = document.getElementById("chart");
+  const evTable = document.getElementById("events");
+  chart.innerHTML = "";
+  let evRows = "";
+  if (csvText) {
+    const lines = csvText.replace(/^﻿/, "").trim().split("\n");
+    const eqs = [], evs = [];
+    for (const line of lines.slice(1)) {
+      const c = line.split(",");   // 結果 CSV 欄內無逗號
+      if (c.length < 7) continue;
+      eqs.push(Number(c[5]));
+      const ev = (c[6] || "").trim();
+      if (ev && ev !== "轉倉") evs.push([c[0], ev, c[5]]);
+    }
+    if (eqs.length > 1) {
+      const W = 720, H = 240, mx = Math.max(...eqs), mn = Math.min(...eqs);
+      const pts = eqs.map((e, i) =>
+        `${(i / (eqs.length - 1) * W).toFixed(1)},${(H - (e - mn) / ((mx - mn) || 1) * (H - 20) - 10).toFixed(1)}`
+      ).join(" ");
+      chart.innerHTML = `<svg viewBox="0 0 ${W} ${H}"><polyline points="${pts}" fill="none" stroke="#2a6" stroke-width="1.5"/></svg>`;
+    }
+    for (const [d, t, eq] of evs)
+      evRows += `<tr><td>${esc(d)}</td><td>${esc(t)}</td><td>${esc(Number(eq).toLocaleString("en-US"))}</td></tr>`;
+  }
+  evTable.innerHTML = "<tr><th>日期</th><th>事件</th><th>權益</th></tr>" +
+    (evRows || "<tr><td colspan=3>無強平/追繳事件</td></tr>");
+}
+
+// ---------- 執行 ----------
+let lastResult = null; // { cfg, capital, summary } 供「存進比較」使用
+const runBtn = document.getElementById("run");
+const saveBtn = document.getElementById("save");
+runBtn.onclick = async () => {
+  const cfg = buildCfg();
+  refreshCfg();
+  runBtn.disabled = true;
+  saveBtn.disabled = true;
+  lastResult = null;
+  const label = runBtn.textContent;
+  runBtn.textContent = "回測中…";
+  statusEl.textContent = "回測中…";
+  errEl.hidden = true;
+  try {
+    const pyodide = await pyodideReady;
+    const capital = numOf("capital") ?? 1000000;
+    pyodide.globals.set("CFG_JSON", JSON.stringify(cfg));
+    pyodide.globals.set("CAPITAL", capital);
+    const r = JSON.parse(pyodide.runPython(PY_GLUE));
+    outEl.textContent = r.out1 + "\n\n" + r.out2;
+    const summary = computeSummary(r.out1, r.out2, r.csv);
+    if (!summary) {
+      errEl.hidden = false;
+      errEl.textContent = "結果解析失敗，原始輸出：\n\n" + r.out1 + "\n\n" + r.out2;
+      document.getElementById("results").hidden = true;
+    } else {
+      renderResults(summary);
+      renderChartAndEvents(r.csv);
+      lastResult = { cfg, capital, summary };
+      saveBtn.disabled = false;
+    }
+  } catch (err) {
+    errEl.hidden = false;
+    errEl.textContent = "發生錯誤：\n" + (err && err.stack ? err.stack : String(err));
+    document.getElementById("results").hidden = true;
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = label;
+    if (statusEl.textContent === "回測中…") statusEl.textContent = "";
+  }
+};
+
+// ---------- 比較頁（localStorage） ----------
+const LS_KEY = "gooaye_bt_results";
+function loadCompare() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || "[]"); }
+  catch (e) { return []; }
+}
+function saveCompare(list) { localStorage.setItem(LS_KEY, JSON.stringify(list)); }
+
+function renderCompare() {
+  const list = loadCompare();
+  const tbody = document.getElementById("cmpTable");
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="9">尚無結果，去回測頁按「存進比較」</td></tr>';
+    return;
+  }
+  let html = "";
+  for (const e of list) {
+    html += `<tr>` +
+      `<td><input type="checkbox" class="cmpChk" data-id="${e.id}"></td>` +
+      `<td><a href="#" class="cmpName" data-id="${e.id}">${esc(e.name)}</a></td>` +
+      `<td>${esc(Number(e.capital).toLocaleString("en-US"))}</td>` +
+      pctCell(e.total) + pctCell(e.maxdd) +
+      `<td>${e.forced} 次</td>` +
+      `<td>${e.best ? esc(e.best.year + ":" + e.best.ret) : "—"}</td>` +
+      `<td>${e.worst ? esc(e.worst.year + ":" + e.worst.ret) : "—"}</td>` +
+      `<td>${e.ruinYear ? "💀 歸零" + esc(e.ruinYear) : (e.forced > 0 ? "💀 強平" + e.forced : "✅")}</td>` +
+      `</tr>`;
+  }
+  tbody.innerHTML = html;
+  for (const a of tbody.querySelectorAll(".cmpName")) {
+    a.onclick = (ev) => {
+      ev.preventDefault();
+      const id = Number(a.dataset.id);
+      const item = loadCompare().find(x => x.id === id);
+      if (item) {
+        setForm(item.cfg);
+        document.getElementById("capital").value = item.capital;
+        switchTab("bt");
+      }
+    };
+  }
+}
+document.getElementById("cmpDelete").onclick = () => {
+  const ids = new Set(Array.from(document.querySelectorAll(".cmpChk:checked")).map(c => Number(c.dataset.id)));
+  if (!ids.size) return;
+  saveCompare(loadCompare().filter(e => !ids.has(e.id)));
+  renderCompare();
+};
+
+// ---------- 匯出／匯入（備份，防 localStorage 被清；可跨手機帶著走） ----------
+function cmpMsg(t) {
+  const s = document.getElementById("cmpStatus");
+  s.textContent = " " + t;
+  setTimeout(() => { if (s.textContent === " " + t) s.textContent = ""; }, 3000);
+}
+document.getElementById("cmpExport").onclick = () => {
+  const list = loadCompare();
+  if (!list.length) { cmpMsg("沒有可匯出的策略"); return; }
+  const blob = new Blob([JSON.stringify(list, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "策略備份_" + new Date().toISOString().slice(0, 10) + ".json";
+  a.click();
+  URL.revokeObjectURL(url);
+  cmpMsg("已匯出 " + list.length + " 筆");
+};
+document.getElementById("cmpImport").onclick = () => document.getElementById("cmpFile").click();
+document.getElementById("cmpFile").onchange = (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const imported = JSON.parse(reader.result);
+      if (!Array.isArray(imported)) throw new Error("格式不符");
+      const map = new Map(loadCompare().map(e => [e.id, e]));   // 以 id 去重，匯入覆蓋同 id
+      for (const e of imported) if (e && e.id) map.set(e.id, e);
+      saveCompare(Array.from(map.values()).sort((a, b) => a.id - b.id));
+      renderCompare();
+      cmpMsg("已匯入 " + imported.length + " 筆");
+    } catch (e) {
+      cmpMsg("匯入失敗：檔案格式不對");
+    }
+    ev.target.value = "";   // 允許再次選同一檔
+  };
+  reader.readAsText(file);
+};
+saveBtn.onclick = () => {
+  if (!lastResult) return;
+  const { cfg, capital, summary } = lastResult;
+  const entry = {
+    id: Date.now(),
+    name: cfg.name || "自訂",
+    capital,
+    total: summary.total,
+    maxdd: summary.maxdd,
+    forced: summary.forced,
+    best: summary.best,
+    worst: summary.worst,
+    ruinYear: summary.ruinYear,
+    cfg,
+  };
+  const list = loadCompare();
+  list.push(entry);
+  saveCompare(list);
+  renderCompare();
+  const prevLabel = statusEl.textContent;
+  statusEl.textContent = "已存進比較";
+  setTimeout(() => { if (statusEl.textContent === "已存進比較") statusEl.textContent = prevLabel === "已存進比較" ? "" : prevLabel; }, 1500);
+};
+
+// ---------- 曲線↔cfg 自測（console.assert，交件前必跑一次） ----------
+function selfTestCurveCfg() {
+  clearCurveRows();
+  addCurveRow(0, 1.0); addCurveRow(6, 1.25); addCurveRow(10, 1.5); addCurveRow(20, 2.0);
+  document.getElementById("cap").value = "";
+  document.getElementById("tranches_pts_on").checked = false;
+  const cfg = {};
+  applyCurveToCfg(cfg);
+  console.assert(cfg.base === 1.0, "[selftest] base 應為1.0，實際=", cfg.base);
+  console.assert(JSON.stringify(cfg.tranches) === JSON.stringify([[6, 0.25], [10, 0.25], [20, 0.5]]),
+    "[selftest] tranches 應為[[6,0.25],[10,0.25],[20,0.5]]，實際=", JSON.stringify(cfg.tranches));
+  console.assert(cfg.cap === 2.0, "[selftest] cap 應為2.0，實際=", cfg.cap);
+  // 反向還原
+  const base = cfg.base;
+  const rows = [[0, base]];
+  let y = base;
+  for (const [t, a] of cfg.tranches) { y = round4(y + a); rows.push([t, y]); }
+  console.assert(JSON.stringify(rows) === JSON.stringify([[0, 1], [6, 1.25], [10, 1.5], [20, 2]]),
+    "[selftest] 反向還原應為[[0,1],[6,1.25],[10,1.5],[20,2]]，實際=", JSON.stringify(rows));
+  console.log("[selftest] curve<->cfg 自測完成：", "base=" + cfg.base, "tranches=" + JSON.stringify(cfg.tranches), "cap=" + cfg.cap);
+}
+selfTestCurveCfg();
+
+// 初始帶入一組中性示範參數（非任何實際策略，只為讓表單不空、示範怎麼填）
+setForm({ name: "範例", base: 1.0, tranches: [[6, 0.25], [10, 0.25], [20, 0.5]], cap: 2.0, exit_cross: [5, 10] });
+renderCompare();
+</script>
+</body>
+</html>
